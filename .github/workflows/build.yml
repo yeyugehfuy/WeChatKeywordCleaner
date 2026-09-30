@@ -1,0 +1,37 @@
+name: Build WeChatKeywordCleaner
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # Linux 免费 runner，无需 Mac
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Theos (Linux)
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-sdks: 'https://github.com/theos/sdks'
+
+      - name: Compile tweak (produces .dylib)
+        run: make
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatKeywordCleaner-dylib
+          path: .theos/obj/WeChatKeywordCleaner.dylib
+
+      - name: Package rootless .deb (best-effort)
+        run: make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+
+      - name: Upload deb artifact (best-effort)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatKeywordCleaner-deb
+          path: packages/*.deb
