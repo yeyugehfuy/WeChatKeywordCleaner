@@ -1,0 +1,9 @@
+Package: com.you.wechatkeywordcleaner
+Name: WeChat Keyword Cleaner
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: 在微信内按关键字搜索并批量删除聊天记录（需自行补 8.0.68 头文件）
+Maintainer: you
+Author: you
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
