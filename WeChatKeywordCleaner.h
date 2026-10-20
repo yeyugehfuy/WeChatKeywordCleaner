@@ -1,15 +1,22 @@
 // WeChatKeywordCleaner.h
-// 共享声明：悬浮按钮入口 + 数据层桥接（搜/删依赖微信 8.0.68 真实 API）
+// Shared declarations: floating button entry point and search/delete bridge.
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 
-// 在微信界面上加一个悬浮按钮「清」，点击弹出关键字清理界面
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Add the "清" floating button inside WeChat.
 void ShowKeywordCleanerFloatingButton(void);
 
-// 数据层桥接：搜索与删除都依赖微信 8.0.68 的真实类/方法，下面仅为占位签名
+#ifdef __cplusplus
+}
+#endif
+
 @interface WeChatBridge : NSObject
-// 按关键字搜索聊天记录；回调数组元素为 @{@"msgId":, @"talker":, @"content":}
+// Results are dictionaries containing msgId, talker, and content.
 + (void)searchKeyword:(NSString *)keyword completion:(void (^)(NSArray *results))completion;
-// 批量删除
+// Batch deletion. This remains unavailable until the exact WeChat 8.0.68 API is verified.
 + (void)deleteMessages:(NSArray *)messages completion:(void (^)(BOOL success))completion;
 @end
