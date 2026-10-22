@@ -112,6 +112,10 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
 }
 
 static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
+    // WeChat 8.0.68 may return a wrapper around the actual search result handler.
+    id innerHandler = KWSendObject0(handler, @"handler");
+    if (innerHandler) handler = innerHandler;
+
     id resultRoot = KWSendObject0(handler, @"getAllResult");
     if (!resultRoot) resultRoot = KWSendObject0(handler, @"arrSessionResultItem");
 
@@ -121,6 +125,8 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
     KWAppendFTSItems(resultRoot, items, visited);
 
     id contactManager = KWGetService(@"CContactMgr");
+    id messageManager = KWGetService(@"CMessageMgr");
+    SEL getMessageSelector = NSSelectorFromString(@"GetMsg:LocalID:");
 
     NSMutableArray *results = [NSMutableArray arrayWithCapacity:items.count];
     NSMutableSet *seen = [NSMutableSet set];
@@ -136,7 +142,12 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
         // Require the full message wrapper. FTS snippets alone are not enough
         // evidence for showing a message as eligible for destructive action.
         id wrap = KWSendObject0(item, @"msgWrap");
-        if (!wrap) continue;
+        if (!wrap && messageManager && [messageManager respondsToSelector:getMessageSelector]) {
+            wrap = KWSendMessageForLocalID(messageManager, getMessageSelector, talker, localID);
+        }
+        Class wrapClass = objc_getClass("CMessageWrap");
+        if (!wrap || (wrapClass && ![wrap isKindOfClass:wrapClass]) ||
+            KWSendUInt0(wrap, @"m_uiMesLocalID") != localID) continue;
         NSString *content = KWSendObject0(wrap, @"m_nsContent");
         if (![content isKindOfClass:[NSString class]] || !content.length) continue;
 
