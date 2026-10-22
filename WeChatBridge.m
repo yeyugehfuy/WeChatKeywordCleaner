@@ -73,6 +73,15 @@ static id KWGetMessageSearchManager(void) {
     return searchManager;
 }
 
+static NSString *KWDisplayNameForTalker(id contactManager, NSString *talker) {
+    id contact = KWSendObject1(contactManager, @"getContactForSearchByName:", talker);
+    NSString *remark = KWSendObject0(contact, @"m_nsRemark");
+    NSString *nickname = KWSendObject0(contact, @"m_nsNickName");
+    if ([remark isKindOfClass:[NSString class]] && remark.length) return remark;
+    if ([nickname isKindOfClass:[NSString class]] && nickname.length) return nickname;
+    return talker;
+}
+
 static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visited) {
     if (!object || object == [NSNull null] || [visited containsObject:object]) return;
     [visited addObject:object];
@@ -102,7 +111,7 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
     }
 }
 
-static NSArray *KWBuildSearchResults(id handler) {
+static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
     id resultRoot = KWSendObject0(handler, @"getAllResult");
     if (!resultRoot) resultRoot = KWSendObject0(handler, @"arrSessionResultItem");
 
@@ -111,36 +120,47 @@ static NSArray *KWBuildSearchResults(id handler) {
                             NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
     KWAppendFTSItems(resultRoot, items, visited);
 
+    id contactManager = KWGetService(@"CContactMgr");
+
     NSMutableArray *results = [NSMutableArray arrayWithCapacity:items.count];
     NSMutableSet *seen = [NSMutableSet set];
     for (id item in items) {
         NSString *talker = KWSendObject0(item, @"userName");
-        id wrap = KWSendObject0(item, @"msgWrap");
         uint32_t localID = KWSendUInt0(item, @"localId");
-        if (!localID && wrap) localID = KWSendUInt0(wrap, @"m_uiMesLocalID");
         if (!talker.length || localID == 0) continue;
 
         NSString *uniqueKey = [NSString stringWithFormat:@"%@:%u", talker, localID];
         if ([seen containsObject:uniqueKey]) continue;
         [seen addObject:uniqueKey];
 
+        // Require the full message wrapper. FTS snippets alone are not enough
+        // evidence for showing a message as eligible for destructive action.
+        id wrap = KWSendObject0(item, @"msgWrap");
+        if (!wrap) continue;
         NSString *content = KWSendObject0(wrap, @"m_nsContent");
-        if (!content.length) content = KWSendObject0(item, @"ftsContent");
-        if (![content isKindOfClass:[NSString class]]) content = [content description] ?: @"";
+        if (![content isKindOfClass:[NSString class]] || !content.length) continue;
 
+        NSRange exactMatch = [content rangeOfString:keyword
+                                            options:(NSCaseInsensitiveSearch | NSLiteralSearch)];
+        if (exactMatch.location == NSNotFound) continue;
+
+        NSString *displayName = KWDisplayNameForTalker(contactManager, talker);
         [results addObject:@{
             @"msgId": [NSString stringWithFormat:@"%u", localID],
             @"talker": talker,
+            @"displayName": displayName ?: talker,
             @"content": content,
             @"__talker": talker,
             @"__localID": @(localID),
-            @"__msgWrap": wrap ?: [NSNull null]
+            @"__keyword": keyword,
+            @"__msgWrap": wrap
         }];
     }
     return results;
 }
 
 @interface KWMessageSearchRequest : NSObject
+@property (nonatomic, copy) NSString *keyword;
 @property (nonatomic, copy) void (^completion)(NSArray *results);
 @property (nonatomic, strong) id resultHandler;
 @property (nonatomic, strong) id searchManager;
@@ -172,6 +192,7 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
 @implementation KWMessageSearchRequest
 
 - (void)startWithKeyword:(NSString *)keyword searchManager:(id)searchManager {
+    self.keyword = keyword;
     self.searchManager = searchManager;
     SEL startSelector = NSSelectorFromString(@"startSearch:limitUsername:searchFinishTarget:");
     if (!searchManager || ![searchManager respondsToSelector:startSelector]) {
@@ -207,8 +228,8 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
             self.finished = YES;
         }
 
-        NSArray *results = KWBuildSearchResults(self.resultHandler) ?: @[];
-        NSLog(@"[WeChatKeywordCleaner] Search completed with %lu message results",
+        NSArray *results = KWBuildSearchResults(self.resultHandler, self.keyword) ?: @[];
+        NSLog(@"[WeChatKeywordCleaner] Exact literal search completed with %lu message results",
               (unsigned long)results.count);
         void (^completion)(NSArray *) = self.completion;
         self.completion = nil;
@@ -270,38 +291,51 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
 
         NSMutableDictionary<NSString *, NSMutableDictionary *> *groups = [NSMutableDictionary dictionary];
         NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        NSString *batchTalker = nil;
         @try {
-            // Resolve and validate every wrap before deleting anything, so a malformed row cannot cause a partial batch.
+            // Re-fetch and re-check each selected message immediately before deletion.
+            // Any row that cannot be proven to contain its exact keyword aborts the whole batch.
             for (id record in messages) {
                 if (![record isKindOfClass:[NSDictionary class]]) {
                     if (completion) completion(NO);
                     return;
                 }
                 NSString *talker = record[@"__talker"] ?: record[@"talker"];
+                NSString *keyword = record[@"__keyword"];
                 NSNumber *localIDNumber = record[@"__localID"];
                 uint32_t localID = localIDNumber ? localIDNumber.unsignedIntValue :
                                    [record[@"msgId"] respondsToSelector:@selector(unsignedIntValue)] ?
                                    [record[@"msgId"] unsignedIntValue] : 0;
-                if (![talker isKindOfClass:[NSString class]] || !talker.length || !localID) {
+                if (![talker isKindOfClass:[NSString class]] || !talker.length || !localID ||
+                    ![keyword isKindOfClass:[NSString class]] || !keyword.length) {
                     if (completion) completion(NO);
                     return;
                 }
+                if (batchTalker && ![batchTalker isEqualToString:talker]) {
+                    NSLog(@"[WeChatKeywordCleaner] Refusing a mixed-chat deletion batch");
+                    if (completion) completion(NO);
+                    return;
+                }
+                batchTalker = talker;
 
                 NSString *uniqueKey = [NSString stringWithFormat:@"%@:%u", talker, localID];
                 if ([seen containsObject:uniqueKey]) continue;
                 [seen addObject:uniqueKey];
 
-                id wrap = record[@"__msgWrap"];
-                if (wrap == [NSNull null]) wrap = nil;
-                if (!wrap) wrap = KWSendMessageForLocalID(messageManager, getMessageSelector, talker, localID);
-                if (!wrap) {
-                    NSLog(@"[WeChatKeywordCleaner] Could not resolve message %@", uniqueKey);
+                id wrap = KWSendMessageForLocalID(messageManager, getMessageSelector, talker, localID);
+                Class wrapClass = objc_getClass("CMessageWrap");
+                if (!wrap || (wrapClass && ![wrap isKindOfClass:wrapClass]) ||
+                    KWSendUInt0(wrap, @"m_uiMesLocalID") != localID) {
+                    NSLog(@"[WeChatKeywordCleaner] Could not validate current message %@", uniqueKey);
                     if (completion) completion(NO);
                     return;
                 }
 
-                Class wrapClass = objc_getClass("CMessageWrap");
-                if (wrapClass && ![wrap isKindOfClass:wrapClass]) {
+                NSString *content = KWSendObject0(wrap, @"m_nsContent");
+                if (![content isKindOfClass:[NSString class]] ||
+                    [content rangeOfString:keyword
+                                   options:(NSCaseInsensitiveSearch | NSLiteralSearch)].location == NSNotFound) {
+                    NSLog(@"[WeChatKeywordCleaner] Message %@ no longer contains the selected literal keyword", uniqueKey);
                     if (completion) completion(NO);
                     return;
                 }
