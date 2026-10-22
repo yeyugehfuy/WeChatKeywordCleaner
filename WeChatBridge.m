@@ -289,10 +289,12 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
             if (self.finished) return;
             self.finished = YES;
         }
-        NSLog(@"[WeChatKeywordCleaner] Search did not complete; returning no results");
+        NSArray *fallbackResults = KWBuildSearchResults(nil, self.keyword) ?: @[];
+        NSLog(@"[WeChatKeywordCleaner] Search callback timed out; direct FTS fallback returned %lu messages",
+              (unsigned long)fallbackResults.count);
         void (^completion)(NSArray *) = self.completion;
         self.completion = nil;
-        if (completion) completion(@[]);
+        if (completion) completion(fallbackResults);
         KWReleaseSearchRequest(self);
     });
 }
