@@ -1,5 +1,5 @@
 // KeywordCleanerUI.m —— 关键字清理界面 + 悬浮按钮
-// 这部分不依赖微信内部 API，可正常编译运行；只有调用 WeChatBridge 的数据是占位的
+// 搜索与删除通过 WeChatBridge 调用微信 8.0.68 的内部消息 API
 
 #import "WeChatKeywordCleaner.h"
 
@@ -48,6 +48,7 @@
     [self.deleteBtn addTarget:self
                        action:@selector(doDelete)
              forControlEvents:UIControlEventTouchUpInside];
+    self.deleteBtn.enabled = NO;
     [self.view addSubview:self.deleteBtn];
 
     self.tableView = [[UITableView alloc]
@@ -79,10 +80,20 @@
     NSString *kw = self.keywordField.text;
     if (!kw.length) return;
 
+    [self.results removeAllObjects];
+    [self.tableView reloadData];
+    self.searchBtn.enabled = NO;
+    self.deleteBtn.enabled = NO;
+
     [WeChatBridge searchKeyword:kw
                       completion:^(NSArray *res) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            self.searchBtn.enabled = YES;
             self.results = [res mutableCopy];
+            [self.deleteBtn setTitle:[NSString stringWithFormat:@"删除全部结果（%lu）",
+                                      (unsigned long)self.results.count]
+                            forState:UIControlStateNormal];
+            self.deleteBtn.enabled = self.results.count > 0;
             [self.tableView reloadData];
         });
     }];
@@ -91,15 +102,40 @@
 - (void)doDelete {
     if (!self.results.count) return;
 
-    [WeChatBridge deleteMessages:self.results
-                      completion:^(BOOL ok) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    NSUInteger count = self.results.count;
+    UIAlertController *confirm =
+        [UIAlertController alertControllerWithTitle:@"确认批量删除？"
+                                            message:[NSString stringWithFormat:
+                                                     @"将从本机微信记录中删除 %lu 条命中消息。此操作无法撤销。",
+                                                     (unsigned long)count]
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"取消"
+                                                style:UIAlertActionStyleCancel
+                                              handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"确认删除"
+                                                style:UIAlertActionStyleDestructive
+                                              handler:^(__unused UIAlertAction *action) {
+        self.deleteBtn.enabled = NO;
+        [WeChatBridge deleteMessages:self.results
+                          completion:^(BOOL ok) {
             if (ok) {
                 [self.results removeAllObjects];
+                [self.deleteBtn setTitle:@"删除全部结果" forState:UIControlStateNormal];
                 [self.tableView reloadData];
+            } else {
+                UIAlertController *failed =
+                    [UIAlertController alertControllerWithTitle:@"删除未能确认完成"
+                                                        message:@"请重新搜索关键词，核对剩余消息后再操作。"
+                                                 preferredStyle:UIAlertControllerStyleAlert];
+                [failed addAction:[UIAlertAction actionWithTitle:@"知道了"
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:nil]];
+                [self presentViewController:failed animated:YES completion:nil];
             }
-        });
-    }];
+            self.deleteBtn.enabled = self.results.count > 0;
+        }];
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
 }
 
 #pragma mark - UITableView
