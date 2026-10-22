@@ -420,7 +420,11 @@ void ShowKeywordCleanerFloatingButton(void) {
     if (button) return;
 
     button = [UIButton buttonWithType:UIButtonTypeCustom];
-    button.frame = CGRectMake(window.bounds.size.width - 60, 100, 44, 44);
+    CGFloat safeTop = window.safeAreaInsets.top;
+    CGFloat safeBottom = window.safeAreaInsets.bottom;
+    CGFloat usableHeight = MAX(0, window.bounds.size.height - safeTop - safeBottom);
+    CGFloat buttonY = safeTop + usableHeight * 0.58;
+    button.frame = CGRectMake(window.bounds.size.width - 60, buttonY, 44, 44);
     button.backgroundColor = [UIColor systemBlueColor];
     [button setTitle:@"清" forState:UIControlStateNormal];
     button.layer.cornerRadius = 22;
