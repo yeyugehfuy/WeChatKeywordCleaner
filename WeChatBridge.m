@@ -43,15 +43,26 @@ static void KWSendDeleteBatch(id target, SEL selector, id talker, NSArray *wraps
 }
 
 static id KWGetService(NSString *className) {
-    Class contextClass = objc_getClass("MMContext");
     Class serviceClass = objc_getClass(className.UTF8String);
+    if (!serviceClass) return nil;
+
+    id serviceCenter = nil;
+    Class contextClass = objc_getClass("MMContext");
     SEL currentContextSelector = NSSelectorFromString(@"currentContext");
-    if (!contextClass || !serviceClass || !class_getClassMethod(contextClass, currentContextSelector)) {
-        return nil;
+    if (contextClass && class_getClassMethod(contextClass, currentContextSelector)) {
+        id context = ((id (*)(id, SEL))objc_msgSend)((id)contextClass, currentContextSelector);
+        serviceCenter = KWSendObject0(context, @"serviceCenter");
     }
 
-    id context = ((id (*)(id, SEL))objc_msgSend)((id)contextClass, currentContextSelector);
-    id serviceCenter = KWSendObject0(context, @"serviceCenter");
+    // Some WeChat builds expose the service center as a singleton instead.
+    if (!serviceCenter) {
+        Class serviceCenterClass = objc_getClass("MMServiceCenter");
+        serviceCenter = KWSendObject0((id)serviceCenterClass, @"defaultCenter");
+    }
+    if (!serviceCenter) {
+        NSLog(@"[WeChatKeywordCleaner] Could not resolve MMServiceCenter for %@", className);
+        return nil;
+    }
     return KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
 }
 
@@ -111,6 +122,22 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
     }
 }
 
+static id KWDirectFTSQuery(NSString *keyword) {
+    id messageSearchService = KWGetService(@"FTSMessageMgr");
+    id database = KWSendObject0(messageSearchService, @"ftsMessageDB");
+    SEL querySelector = NSSelectorFromString(@"queryText:limitUsrname:cancelBlock:");
+    if (!database || ![database respondsToSelector:querySelector]) {
+        NSLog(@"[WeChatKeywordCleaner] Direct FTS database query API unavailable");
+        return nil;
+    }
+    @try {
+        return KWSendObject3(database, querySelector, keyword, nil, nil);
+    } @catch (NSException *exception) {
+        NSLog(@"[WeChatKeywordCleaner] Direct FTS query raised %@", exception.name);
+        return nil;
+    }
+}
+
 static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
     // WeChat 8.0.68 may return a wrapper around the actual search result handler.
     id innerHandler = KWSendObject0(handler, @"handler");
@@ -123,6 +150,13 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
     NSHashTable *visited = [NSHashTable hashTableWithOptions:
                             NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
     KWAppendFTSItems(resultRoot, items, visited);
+    if (!items.count) {
+        // Fall back to the exact synchronous FTSMessageDB API present in 8.0.68.
+        id directRoot = KWDirectFTSQuery(keyword);
+        if (directRoot) KWAppendFTSItems(directRoot, items, visited);
+        NSLog(@"[WeChatKeywordCleaner] Direct FTS fallback found %lu candidate items",
+              (unsigned long)items.count);
+    }
 
     id contactManager = KWGetService(@"CContactMgr");
     id messageManager = KWGetService(@"CMessageMgr");
@@ -277,8 +311,9 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
 
     id searchManager = KWGetMessageSearchManager();
     if (!searchManager) {
-        NSLog(@"[WeChatKeywordCleaner] Unable to get WeChat FTS search service");
-        if (completion) completion(@[]);
+        NSLog(@"[WeChatKeywordCleaner] Async FTS manager unavailable; trying direct FTS query");
+        NSArray *results = KWBuildSearchResults(nil, trimmedKeyword) ?: @[];
+        if (completion) completion(results);
         return;
     }
 
