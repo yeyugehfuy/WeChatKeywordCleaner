@@ -138,26 +138,7 @@ static id KWDirectFTSQuery(NSString *keyword) {
     }
 }
 
-static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
-    // WeChat 8.0.68 may return a wrapper around the actual search result handler.
-    id innerHandler = KWSendObject0(handler, @"handler");
-    if (innerHandler) handler = innerHandler;
-
-    id resultRoot = KWSendObject0(handler, @"getAllResult");
-    if (!resultRoot) resultRoot = KWSendObject0(handler, @"arrSessionResultItem");
-
-    NSMutableArray *items = [NSMutableArray array];
-    NSHashTable *visited = [NSHashTable hashTableWithOptions:
-                            NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
-    KWAppendFTSItems(resultRoot, items, visited);
-    if (!items.count) {
-        // Fall back to the exact synchronous FTSMessageDB API present in 8.0.68.
-        id directRoot = KWDirectFTSQuery(keyword);
-        if (directRoot) KWAppendFTSItems(directRoot, items, visited);
-        NSLog(@"[WeChatKeywordCleaner] Direct FTS fallback found %lu candidate items",
-              (unsigned long)items.count);
-    }
-
+static NSArray *KWResolveFTSItems(NSArray *items, NSString *keyword) {
     id contactManager = KWGetService(@"CContactMgr");
     id messageManager = KWGetService(@"CMessageMgr");
     SEL getMessageSelector = NSSelectorFromString(@"GetMsg:LocalID:");
@@ -173,8 +154,7 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
         if ([seen containsObject:uniqueKey]) continue;
         [seen addObject:uniqueKey];
 
-        // Require the full message wrapper. FTS snippets alone are not enough
-        // evidence for showing a message as eligible for destructive action.
+        // Require a current full message wrapper before presenting a destructive result.
         id wrap = KWSendObject0(item, @"msgWrap");
         if (!wrap && messageManager && [messageManager respondsToSelector:getMessageSelector]) {
             wrap = KWSendMessageForLocalID(messageManager, getMessageSelector, talker, localID);
@@ -182,6 +162,7 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
         Class wrapClass = objc_getClass("CMessageWrap");
         if (!wrap || (wrapClass && ![wrap isKindOfClass:wrapClass]) ||
             KWSendUInt0(wrap, @"m_uiMesLocalID") != localID) continue;
+
         NSString *content = KWSendObject0(wrap, @"m_nsContent");
         if (![content isKindOfClass:[NSString class]] || !content.length) continue;
 
@@ -201,6 +182,43 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
             @"__msgWrap": wrap
         }];
     }
+    return results;
+}
+
+static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
+    // WeChat 8.0.68 may return a wrapper around the actual search result handler.
+    id innerHandler = KWSendObject0(handler, @"handler");
+    if (innerHandler) handler = innerHandler;
+
+    id resultRoot = KWSendObject0(handler, @"getAllResult");
+    if (!resultRoot) resultRoot = KWSendObject0(handler, @"arrSessionResultItem");
+
+    NSMutableArray *items = [NSMutableArray array];
+    NSHashTable *visited = [NSHashTable hashTableWithOptions:
+                            NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
+    KWAppendFTSItems(resultRoot, items, visited);
+
+    NSArray *results = KWResolveFTSItems(items, keyword);
+    NSLog(@"[WeChatKeywordCleaner] Primary FTS candidates=%lu exact messages=%lu",
+          (unsigned long)items.count, (unsigned long)results.count);
+
+    // A candidate can be present in the async result tree but fail full-wrap validation.
+    // Retry against the confirmed synchronous FTS database API whenever no safe result remains.
+    if (!results.count) {
+        id directRoot = KWDirectFTSQuery(keyword);
+        NSMutableArray *directItems = [NSMutableArray array];
+        NSHashTable *directVisited = [NSHashTable hashTableWithOptions:
+                                      NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
+        KWAppendFTSItems(directRoot, directItems, directVisited);
+        NSLog(@"[WeChatKeywordCleaner] Direct FTS fallback candidates=%lu",
+              (unsigned long)directItems.count);
+        if (directItems.count) {
+            results = KWResolveFTSItems(directItems, keyword);
+        }
+    }
+
+    NSLog(@"[WeChatKeywordCleaner] Search finished with %lu exact message results",
+          (unsigned long)results.count);
     return results;
 }
 
