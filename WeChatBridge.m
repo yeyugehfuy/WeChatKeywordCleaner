@@ -373,7 +373,7 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
                 for (NSString *talker in groups) {
                     id remaining = KWSendObject2(messageManager, @"GetMsg:LocalIDArray:",
                                                  talker, groups[talker][@"localIDs"]);
-                    if ([remaining isKindOfClass:[NSArray class]] && [(NSArray *)remaining count] > 0) {
+                    if (![remaining isKindOfClass:[NSArray class]] || [(NSArray *)remaining count] > 0) {
                         allRemoved = NO;
                         break;
                     }
