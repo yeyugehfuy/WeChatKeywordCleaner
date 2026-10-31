@@ -7,7 +7,8 @@
 - (void)viewDidLoad {
     %orig;
 
-    UINavigationItem *navigationItem = self.navigationItem;
+    UIViewController *controller = (UIViewController *)self;
+    UINavigationItem *navigationItem = controller.navigationItem;
     if (!navigationItem) return;
 
     NSMutableArray<UIBarButtonItem *> *items =
