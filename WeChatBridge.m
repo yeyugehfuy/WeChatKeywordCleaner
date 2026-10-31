@@ -58,46 +58,54 @@ static void KWSendDeleteBatch(id target, SEL selector, id talker, NSArray *wraps
 
 static id KWGetService(NSString *className) {
     Class serviceClass = objc_getClass(className.UTF8String);
-    if (!serviceClass) return nil;
-
-    id serviceCenter = nil;
-    Class contextClass = objc_getClass("MMContext");
-    SEL currentContextSelector = NSSelectorFromString(@"currentContext");
-    if (contextClass && class_getClassMethod(contextClass, currentContextSelector)) {
-        id context = ((id (*)(id, SEL))objc_msgSend)((id)contextClass, currentContextSelector);
-        serviceCenter = KWSendObject0(context, @"serviceCenter");
-    }
-
-    // Some WeChat builds expose the service center as a singleton instead.
-    if (!serviceCenter) {
-        Class serviceCenterClass = objc_getClass("MMServiceCenter");
-        serviceCenter = KWSendObject0((id)serviceCenterClass, @"defaultCenter");
-    }
-    if (!serviceCenter) {
-        NSLog(@"[WeChatKeywordCleaner] Could not resolve MMServiceCenter for %@", className);
+    if (!serviceClass) {
+        NSLog(@"[WeChatKeywordCleaner] Service class %@ is not loaded", className);
         return nil;
     }
-    return KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
+
+    Class contextClass = objc_getClass("MMContext");
+    SEL currentContextSelector = NSSelectorFromString(@"currentContext");
+    id context = nil;
+    if (contextClass && class_getClassMethod(contextClass, currentContextSelector)) {
+        context = ((id (*)(id, SEL))objc_msgSend)((id)contextClass, currentContextSelector);
+    }
+
+    // WeChat 8.0.68 exposes service lookup directly on MMContext.
+    id service = KWSendObject1(context, @"getService:", (id)serviceClass);
+    if (service) return service;
+
+    // Keep the service-center route as a compatibility fallback.
+    id serviceCenter = KWSendObject0(context, @"serviceCenter");
+    service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
+    if (service) return service;
+
+    Class serviceCenterClass = objc_getClass("MMServiceCenter");
+    serviceCenter = KWSendObject0((id)serviceCenterClass, @"defaultCenter");
+    service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
+    if (!service) {
+        NSLog(@"[WeChatKeywordCleaner] Could not resolve %@ through MMContext or MMServiceCenter",
+              className);
+    }
+    return service;
 }
 
 static id KWGetMessageSearchManager(void) {
     id messageSearchService = KWGetService(@"FTSMessageMgr");
     if (!messageSearchService) {
-        KWSetSearchDiagnostic(@"微信的 FTSMessageMgr 服务没有取得。");
+        KWSetSearchDiagnostic(@"无法从当前 MMContext 取得 FTSMessageMgr 服务。");
         return nil;
     }
 
     id searchManager = KWSendObject0(messageSearchService, @"searchMgr");
     if (searchManager) {
-        KWSetSearchDiagnostic(@"微信搜索服务和搜索管理器已取得。");
+        KWSetSearchDiagnostic(@"已取得微信原生 FTS 搜索管理器。");
         return searchManager;
     }
 
-    // Some WeChat startup paths create the FTS search manager lazily.
     id database = KWSendObject0(messageSearchService, @"ftsMessageDB");
     Class searchManagerClass = objc_getClass("FTSMsgSearchMgr");
     if (!database || !searchManagerClass) {
-        KWSetSearchDiagnostic(@"已取得微信搜索服务，但数据库或搜索管理器类不可用。");
+        KWSetSearchDiagnostic(@"已取得 FTSMessageMgr，但 ftsMessageDB 或搜索管理器类为空。");
         return nil;
     }
 
@@ -105,9 +113,8 @@ static id KWGetMessageSearchManager(void) {
     searchManager = KWSendObject1(allocated, @"initWithDB:", database);
     if (searchManager) {
         KWSendObject1(messageSearchService, @"setSearchMgr:", searchManager);
-        KWSetSearchDiagnostic(@"已用微信搜索数据库创建搜索管理器。");
     } else {
-        KWSetSearchDiagnostic(@"微信搜索管理器初始化失败。");
+        KWSetSearchDiagnostic(@"微信原生 FTS 搜索管理器初始化失败。");
     }
     return searchManager;
 }
@@ -152,19 +159,31 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
 
 static id KWDirectFTSQuery(NSString *keyword) {
     id messageSearchService = KWGetService(@"FTSMessageMgr");
-    id database = KWSendObject0(messageSearchService, @"ftsMessageDB");
-    SEL querySelector = NSSelectorFromString(@"queryText:limitUsrname:cancelBlock:");
-    if (!database || ![database respondsToSelector:querySelector]) {
-        KWSetSearchDiagnostic(@"微信搜索数据库或 queryText 接口不可用。");
-        NSLog(@"[WeChatKeywordCleaner] Direct FTS database query API unavailable");
+    if (!messageSearchService) {
+        KWSetSearchDiagnostic(@"MMContext 未返回 FTSMessageMgr；尚未访问聊天记录索引。");
         return nil;
     }
+
+    id database = KWSendObject0(messageSearchService, @"ftsMessageDB");
+    if (!database) {
+        KWSetSearchDiagnostic(@"FTSMessageMgr 已取得，但 ftsMessageDB 返回空对象。");
+        return nil;
+    }
+
+    SEL querySelector = NSSelectorFromString(@"queryText:limitUsrname:cancelBlock:");
+    if (![database respondsToSelector:querySelector]) {
+        KWSetSearchDiagnostic(@"ftsMessageDB 对象没有 8.0.68 的 queryText:limitUsrname:cancelBlock: 方法。");
+        return nil;
+    }
+
     @try {
         id result = KWSendObject3(database, querySelector, keyword, nil, nil);
-        if (!result) KWSetSearchDiagnostic(@"微信全文索引查询接口已调用，但返回空结果对象。");
+        if (!result) {
+            KWSetSearchDiagnostic(@"queryText 方法已调用，但微信返回空结果对象。");
+        }
         return result;
     } @catch (NSException *exception) {
-        KWSetSearchDiagnostic([NSString stringWithFormat:@"微信全文索引查询异常：%@", exception.name]);
+        KWSetSearchDiagnostic([NSString stringWithFormat:@"微信 queryText 调用异常：%@", exception.name]);
         NSLog(@"[WeChatKeywordCleaner] Direct FTS query raised %@", exception.name);
         return nil;
     }
