@@ -1,4 +1,4 @@
-// KeywordCleanerUI.m —— 关键字清理界面 + 悬浮按钮
+// KeywordCleanerUI.m —— 微信内的关键字清理界面
 // 搜索结果先按消息原文精确筛选；删除必须逐条手动勾选。
 
 #import "WeChatKeywordCleaner.h"
@@ -200,6 +200,21 @@
             self.allResults = [res mutableCopy] ?: [NSMutableArray array];
             self.scopeBtn.enabled = self.allResults.count > 0;
             [self applyScopeFilter];
+
+            if (!self.allResults.count) {
+                NSString *diagnostic = [WeChatBridge lastSearchDiagnostic] ?: @"搜索流程未返回诊断信息。";
+                UIAlertController *alert =
+                    [UIAlertController alertControllerWithTitle:@"没有找到可核验的消息"
+                                                        message:[NSString stringWithFormat:
+                                                                 @"%@\n\n没有执行删除。诊断：%@",
+                                                                 @"请确认关键词与微信自带搜索中命中的消息原文一致。",
+                                                                 diagnostic]
+                                                 preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"知道了"
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            }
         });
     }];
 }
@@ -410,99 +425,6 @@ static UIWindow *KWGetKeyWindow(void) {
     return nil;
 }
 
-#pragma mark - Floating button
-
-static NSString * const KWFloatingButtonCenterKey = @"WeChatKeywordCleaner.FloatingButtonCenter";
-
-static CGPoint KWClampFloatingButtonCenter(CGPoint center, UIWindow *window, CGSize size) {
-    CGFloat minX = size.width / 2.0 + 8.0;
-    CGFloat maxX = window.bounds.size.width - size.width / 2.0 - 8.0;
-    CGFloat minY = window.safeAreaInsets.top + size.height / 2.0 + 8.0;
-    CGFloat maxY = window.bounds.size.height - window.safeAreaInsets.bottom - size.height / 2.0 - 8.0;
-
-    if (maxX < minX) center.x = window.bounds.size.width / 2.0;
-    else center.x = MIN(MAX(center.x, minX), maxX);
-    if (maxY < minY) center.y = window.bounds.size.height / 2.0;
-    else center.y = MIN(MAX(center.y, minY), maxY);
-    return center;
-}
-
-@interface KWFloatingButtonDragHandler : NSObject
-- (void)handlePan:(UIPanGestureRecognizer *)gesture;
-@end
-
-@implementation KWFloatingButtonDragHandler
-
-- (void)handlePan:(UIPanGestureRecognizer *)gesture {
-    UIView *button = gesture.view;
-    UIWindow *window = button.window;
-    if (!window) return;
-
-    UIGestureRecognizerState state = gesture.state;
-    if (state == UIGestureRecognizerStateBegan ||
-        state == UIGestureRecognizerStateChanged ||
-        state == UIGestureRecognizerStateEnded) {
-        CGPoint translation = [gesture translationInView:window];
-        CGPoint center = button.center;
-        center.x += translation.x;
-        center.y += translation.y;
-        button.center = KWClampFloatingButtonCenter(center, window, button.bounds.size);
-        [gesture setTranslation:CGPointZero inView:window];
-    }
-
-    if (state == UIGestureRecognizerStateEnded ||
-        state == UIGestureRecognizerStateCancelled) {
-        [[NSUserDefaults standardUserDefaults]
-         setObject:NSStringFromCGPoint(button.center)
-         forKey:KWFloatingButtonCenterKey];
-    }
-}
-
-@end
-
-void ShowKeywordCleanerFloatingButton(void) {
-    UIWindow *window = KWGetKeyWindow();
-    if (!window) return;
-
-    static UIButton *button;
-    static KWFloatingButtonDragHandler *dragHandler;
-    if (button.superview == window) return;
-    [button removeFromSuperview];
-
-    button = [UIButton buttonWithType:UIButtonTypeCustom];
-    CGFloat safeTop = window.safeAreaInsets.top;
-    CGFloat safeBottom = window.safeAreaInsets.bottom;
-    CGFloat usableHeight = MAX(0, window.bounds.size.height - safeTop - safeBottom);
-    CGPoint center = CGPointMake(window.bounds.size.width - 38.0,
-                                 safeTop + usableHeight * 0.58 + 22.0);
-    NSString *savedCenter = [[NSUserDefaults standardUserDefaults]
-                             stringForKey:KWFloatingButtonCenterKey];
-    if (savedCenter.length) center = CGPointFromString(savedCenter);
-    button.bounds = CGRectMake(0, 0, 44, 44);
-    button.center = KWClampFloatingButtonCenter(center, window, button.bounds.size);
-    button.backgroundColor = [UIColor systemBlueColor];
-    [button setTitle:@"清" forState:UIControlStateNormal];
-    button.layer.cornerRadius = 22;
-    button.layer.shadowColor = [UIColor blackColor].CGColor;
-    button.layer.shadowOpacity = 0.22;
-    button.layer.shadowRadius = 5;
-    button.layer.shadowOffset = CGSizeMake(0, 2);
-    button.accessibilityLabel = @"清理聊天记录";
-    button.accessibilityHint = @"拖动可移动位置";
-
-    [button addTarget:[KeywordCleanerViewController class]
-               action:@selector(presentCleaner)
-     forControlEvents:UIControlEventTouchUpInside];
-
-    if (!dragHandler) dragHandler = [KWFloatingButtonDragHandler new];
-    UIPanGestureRecognizer *pan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:dragHandler
-                                                action:@selector(handlePan:)];
-    // A recognized drag cancels the button touch, so moving it won't open the cleaner.
-    pan.cancelsTouchesInView = YES;
-    [button addGestureRecognizer:pan];
-    [window addSubview:button];
-}
 
 #pragma mark - Present Cleaner
 
@@ -514,9 +436,31 @@ void ShowKeywordCleanerFloatingButton(void) {
         [[UINavigationController alloc] initWithRootViewController:viewController];
     UIWindow *window = KWGetKeyWindow();
     if (!window) return;
-    [window.rootViewController presentViewController:navigationController
-                                            animated:YES
-                                          completion:nil];
+    UIViewController *presenter = window.rootViewController;
+    while (presenter) {
+        if (presenter.presentedViewController) {
+            presenter = presenter.presentedViewController;
+            continue;
+        }
+        if ([presenter isKindOfClass:[UITabBarController class]]) {
+            UIViewController *selected = ((UITabBarController *)presenter).selectedViewController;
+            if (selected) {
+                presenter = selected;
+                continue;
+            }
+        }
+        if ([presenter isKindOfClass:[UINavigationController class]]) {
+            UIViewController *visible = ((UINavigationController *)presenter).visibleViewController;
+            if (visible) {
+                presenter = visible;
+                continue;
+            }
+        }
+        break;
+    }
+    [presenter presentViewController:navigationController
+                            animated:YES
+                          completion:nil];
 }
 
 @end
