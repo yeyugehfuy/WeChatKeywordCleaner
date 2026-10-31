@@ -63,27 +63,45 @@ static id KWGetService(NSString *className) {
         return nil;
     }
 
+    NSMutableArray *contexts = [NSMutableArray array];
     Class contextClass = objc_getClass("MMContext");
-    SEL currentContextSelector = NSSelectorFromString(@"currentContext");
-    id context = nil;
-    if (contextClass && class_getClassMethod(contextClass, currentContextSelector)) {
-        context = ((id (*)(id, SEL))objc_msgSend)((id)contextClass, currentContextSelector);
+    if (contextClass) {
+        // Search data services belong to the logged-in user's context.
+        id activeContext = KWSendObject0((id)contextClass, @"activeUserContext");
+        if (activeContext) [contexts addObject:activeContext];
+
+        // Keep the thread-current context as a fallback.
+        SEL currentContextSelector = NSSelectorFromString(@"currentContext");
+        if (class_getClassMethod(contextClass, currentContextSelector)) {
+            id currentContext = ((id (*)(id, SEL))objc_msgSend)((id)contextClass,
+                                                                 currentContextSelector);
+            if (currentContext && ![contexts containsObject:currentContext]) {
+                [contexts addObject:currentContext];
+            }
+        }
     }
 
-    // WeChat 8.0.68 exposes service lookup directly on MMContext.
-    id service = KWSendObject1(context, @"getService:", (id)serviceClass);
-    if (service) return service;
+    Class contextManagerClass = objc_getClass("MMContextManager");
+    id contextManager = KWSendObject0((id)contextManagerClass, @"defaultManager");
+    id managerActiveContext = KWSendObject0(contextManager, @"activeUserContext");
+    if (managerActiveContext && ![contexts containsObject:managerActiveContext]) {
+        [contexts addObject:managerActiveContext];
+    }
 
-    // Keep the service-center route as a compatibility fallback.
-    id serviceCenter = KWSendObject0(context, @"serviceCenter");
-    service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
-    if (service) return service;
+    for (id context in contexts) {
+        id service = KWSendObject1(context, @"getService:", (id)serviceClass);
+        if (service) return service;
+
+        id serviceCenter = KWSendObject0(context, @"serviceCenter");
+        service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
+        if (service) return service;
+    }
 
     Class serviceCenterClass = objc_getClass("MMServiceCenter");
-    serviceCenter = KWSendObject0((id)serviceCenterClass, @"defaultCenter");
-    service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
+    id serviceCenter = KWSendObject0((id)serviceCenterClass, @"defaultCenter");
+    id service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
     if (!service) {
-        NSLog(@"[WeChatKeywordCleaner] Could not resolve %@ through MMContext or MMServiceCenter",
+        NSLog(@"[WeChatKeywordCleaner] Could not resolve %@ from active/current contexts",
               className);
     }
     return service;
