@@ -5,6 +5,20 @@
 #import <objc/runtime.h>
 #import <stdint.h>
 
+static NSString *KWSearchDiagnostic = @"尚未搜索";
+
+static void KWSetSearchDiagnostic(NSString *diagnostic) {
+    @synchronized ([WeChatBridge class]) {
+        KWSearchDiagnostic = [diagnostic copy] ?: @"";
+    }
+}
+
+static NSString *KWGetSearchDiagnostic(void) {
+    @synchronized ([WeChatBridge class]) {
+        return [KWSearchDiagnostic copy] ?: @"";
+    }
+}
+
 static id KWSendObject0(id target, NSString *selectorName) {
     SEL selector = NSSelectorFromString(selectorName);
     if (!target || ![target respondsToSelector:selector]) return nil;
@@ -68,18 +82,32 @@ static id KWGetService(NSString *className) {
 
 static id KWGetMessageSearchManager(void) {
     id messageSearchService = KWGetService(@"FTSMessageMgr");
+    if (!messageSearchService) {
+        KWSetSearchDiagnostic(@"微信的 FTSMessageMgr 服务没有取得。");
+        return nil;
+    }
+
     id searchManager = KWSendObject0(messageSearchService, @"searchMgr");
-    if (searchManager) return searchManager;
+    if (searchManager) {
+        KWSetSearchDiagnostic(@"微信搜索服务和搜索管理器已取得。");
+        return searchManager;
+    }
 
     // Some WeChat startup paths create the FTS search manager lazily.
     id database = KWSendObject0(messageSearchService, @"ftsMessageDB");
     Class searchManagerClass = objc_getClass("FTSMsgSearchMgr");
-    if (!messageSearchService || !database || !searchManagerClass) return nil;
+    if (!database || !searchManagerClass) {
+        KWSetSearchDiagnostic(@"已取得微信搜索服务，但数据库或搜索管理器类不可用。");
+        return nil;
+    }
 
     id allocated = KWSendObject0((id)searchManagerClass, @"alloc");
     searchManager = KWSendObject1(allocated, @"initWithDB:", database);
     if (searchManager) {
         KWSendObject1(messageSearchService, @"setSearchMgr:", searchManager);
+        KWSetSearchDiagnostic(@"已用微信搜索数据库创建搜索管理器。");
+    } else {
+        KWSetSearchDiagnostic(@"微信搜索管理器初始化失败。");
     }
     return searchManager;
 }
@@ -127,12 +155,16 @@ static id KWDirectFTSQuery(NSString *keyword) {
     id database = KWSendObject0(messageSearchService, @"ftsMessageDB");
     SEL querySelector = NSSelectorFromString(@"queryText:limitUsrname:cancelBlock:");
     if (!database || ![database respondsToSelector:querySelector]) {
+        KWSetSearchDiagnostic(@"微信搜索数据库或 queryText 接口不可用。");
         NSLog(@"[WeChatKeywordCleaner] Direct FTS database query API unavailable");
         return nil;
     }
     @try {
-        return KWSendObject3(database, querySelector, keyword, nil, nil);
+        id result = KWSendObject3(database, querySelector, keyword, nil, nil);
+        if (!result) KWSetSearchDiagnostic(@"微信全文索引查询接口已调用，但返回空结果对象。");
+        return result;
     } @catch (NSException *exception) {
+        KWSetSearchDiagnostic([NSString stringWithFormat:@"微信全文索引查询异常：%@", exception.name]);
         NSLog(@"[WeChatKeywordCleaner] Direct FTS query raised %@", exception.name);
         return nil;
     }
@@ -154,16 +186,22 @@ static NSArray *KWResolveFTSItems(NSArray *items, NSString *keyword) {
         if ([seen containsObject:uniqueKey]) continue;
         [seen addObject:uniqueKey];
 
-        // Require a current full message wrapper before presenting a destructive result.
         id wrap = KWSendObject0(item, @"msgWrap");
+        Class wrapClass = objc_getClass("CMessageWrap");
+        if (wrapClass && wrap && ![wrap isKindOfClass:wrapClass]) wrap = nil;
+        if (wrap && KWSendUInt0(wrap, @"m_uiMesLocalID") != localID) wrap = nil;
         if (!wrap && messageManager && [messageManager respondsToSelector:getMessageSelector]) {
             wrap = KWSendMessageForLocalID(messageManager, getMessageSelector, talker, localID);
         }
-        Class wrapClass = objc_getClass("CMessageWrap");
-        if (!wrap || (wrapClass && ![wrap isKindOfClass:wrapClass]) ||
-            KWSendUInt0(wrap, @"m_uiMesLocalID") != localID) continue;
+        if (wrapClass && wrap && ![wrap isKindOfClass:wrapClass]) wrap = nil;
+        if (wrap && KWSendUInt0(wrap, @"m_uiMesLocalID") != localID) wrap = nil;
 
-        NSString *content = KWSendObject0(wrap, @"m_nsContent");
+        // Some FTS items contain the searchable text but omit msgWrap. Show those
+        // indexed candidates; deleteMessages re-fetches the message and re-checks
+        // the literal keyword before any deletion is sent.
+        NSString *content = wrap ? KWSendObject0(wrap, @"m_nsContent") : nil;
+        BOOL indexOnly = ![content isKindOfClass:[NSString class]] || !content.length;
+        if (indexOnly) content = KWSendObject0(item, @"ftsContent");
         if (![content isKindOfClass:[NSString class]] || !content.length) continue;
 
         NSRange exactMatch = [content rangeOfString:keyword
@@ -179,7 +217,8 @@ static NSArray *KWResolveFTSItems(NSArray *items, NSString *keyword) {
             @"__talker": talker,
             @"__localID": @(localID),
             @"__keyword": keyword,
-            @"__msgWrap": wrap
+            @"__indexOnly": @(indexOnly),
+            @"__msgWrap": wrap ?: [NSNull null]
         }];
     }
     return results;
@@ -190,34 +229,50 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
     id innerHandler = KWSendObject0(handler, @"handler");
     if (innerHandler) handler = innerHandler;
 
-    id resultRoot = KWSendObject0(handler, @"getAllResult");
-    if (!resultRoot) resultRoot = KWSendObject0(handler, @"arrSessionResultItem");
-
     NSMutableArray *items = [NSMutableArray array];
     NSHashTable *visited = [NSHashTable hashTableWithOptions:
                             NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
-    KWAppendFTSItems(resultRoot, items, visited);
 
+    id allResults = KWSendObject0(handler, @"getAllResult");
+    if (allResults) KWAppendFTSItems(allResults, items, visited);
+    // getAllResult can be an empty container while arrSessionResultItem is populated.
+    if (!items.count) {
+        id sessionResults = KWSendObject0(handler, @"arrSessionResultItem");
+        if (sessionResults) KWAppendFTSItems(sessionResults, items, visited);
+    }
+
+    NSUInteger primaryCandidates = items.count;
     NSArray *results = KWResolveFTSItems(items, keyword);
-    NSLog(@"[WeChatKeywordCleaner] Primary FTS candidates=%lu exact messages=%lu",
-          (unsigned long)items.count, (unsigned long)results.count);
+    NSUInteger directCandidates = 0;
+    NSString *directFailure = nil;
 
-    // A candidate can be present in the async result tree but fail full-wrap validation.
-    // Retry against the confirmed synchronous FTS database API whenever no safe result remains.
+    // Retry whenever candidates fail full-text verification, not only when parsing
+    // the async result tree returns an empty candidate list.
     if (!results.count) {
         id directRoot = KWDirectFTSQuery(keyword);
         NSMutableArray *directItems = [NSMutableArray array];
         NSHashTable *directVisited = [NSHashTable hashTableWithOptions:
                                       NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
-        KWAppendFTSItems(directRoot, directItems, directVisited);
-        NSLog(@"[WeChatKeywordCleaner] Direct FTS fallback candidates=%lu",
-              (unsigned long)directItems.count);
-        if (directItems.count) {
-            results = KWResolveFTSItems(directItems, keyword);
-        }
+        if (directRoot) KWAppendFTSItems(directRoot, directItems, directVisited);
+        directCandidates = directItems.count;
+        if (directItems.count) results = KWResolveFTSItems(directItems, keyword);
+        if (!directRoot) directFailure = KWGetSearchDiagnostic();
     }
 
-    NSLog(@"[WeChatKeywordCleaner] Search finished with %lu exact message results",
+    if (results.count) {
+        KWSetSearchDiagnostic([NSString stringWithFormat:@"已找到 %lu 条原文精确匹配。", (unsigned long)results.count]);
+    } else {
+        NSString *detail = directFailure.length ? directFailure : @"没有得到可核验的匹配消息。";
+        KWSetSearchDiagnostic([NSString stringWithFormat:
+                               @"异步候选：%lu 条；备用索引候选：%lu 条；原文精确匹配：0 条。%@",
+                               (unsigned long)primaryCandidates,
+                               (unsigned long)directCandidates,
+                               detail]);
+    }
+
+    NSLog(@"[WeChatKeywordCleaner] Search candidates primary=%lu direct=%lu exact=%lu",
+          (unsigned long)primaryCandidates,
+          (unsigned long)directCandidates,
           (unsigned long)results.count);
     return results;
 }
@@ -321,10 +376,15 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
 
 @implementation WeChatBridge
 
++ (NSString *)lastSearchDiagnostic {
+    return KWGetSearchDiagnostic();
+}
+
 + (void)searchKeyword:(NSString *)keyword completion:(void (^)(NSArray *))completion {
     NSString *trimmedKeyword = [keyword stringByTrimmingCharactersInSet:
                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!trimmedKeyword.length) {
+        KWSetSearchDiagnostic(@"请输入搜索关键词。");
         if (completion) completion(@[]);
         return;
     }
