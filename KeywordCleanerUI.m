@@ -381,9 +381,13 @@
     cell.textLabel.text = record[@"content"] ?: @"(无可显示文本)";
     NSString *displayName = record[@"displayName"] ?: record[@"talker"] ?: @"";
     NSString *talker = record[@"talker"] ?: @"";
-    cell.detailTextLabel.text = [displayName isEqualToString:talker]
-                                ? displayName
-                                : [NSString stringWithFormat:@"%@ · %@", displayName, talker];
+    NSString *detail = [displayName isEqualToString:talker]
+                       ? displayName
+                       : [NSString stringWithFormat:@"%@ · %@", displayName, talker];
+    if ([record[@"__indexOnly"] boolValue]) {
+        detail = [detail stringByAppendingString:@" · 索引预览，删除前会核验原文"];
+    }
+    cell.detailTextLabel.text = detail;
     NSString *key = [self keyForRecord:record];
     cell.accessoryType = (key && [self.selectedKeys containsObject:key])
                          ? UITableViewCellAccessoryCheckmark
