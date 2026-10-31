@@ -56,6 +56,18 @@ static void KWSendDeleteBatch(id target, SEL selector, id talker, NSArray *wraps
     ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(target, selector, talker, wraps, NO);
 }
 
+static void KWAddContext(NSMutableArray *contexts, NSHashTable *visited, id context) {
+    if (!context || [visited containsObject:context]) return;
+    [visited addObject:context];
+    [contexts addObject:context];
+}
+
+static BOOL KWSendBool1(id target, NSString *selectorName, id arg1) {
+    SEL selector = NSSelectorFromString(selectorName);
+    if (!target || ![target respondsToSelector:selector]) return NO;
+    return ((BOOL (*)(id, SEL, id))objc_msgSend)(target, selector, arg1);
+}
+
 static id KWGetService(NSString *className) {
     Class serviceClass = objc_getClass(className.UTF8String);
     if (!serviceClass) {
@@ -64,53 +76,63 @@ static id KWGetService(NSString *className) {
     }
 
     NSMutableArray *contexts = [NSMutableArray array];
+    NSHashTable *visited = [NSHashTable hashTableWithOptions:
+                            NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
     Class contextClass = objc_getClass("MMContext");
     if (contextClass) {
-        // Search data services belong to the logged-in user's context.
-        id activeContext = KWSendObject0((id)contextClass, @"activeUserContext");
-        if (activeContext) [contexts addObject:activeContext];
-
-        // Keep the thread-current context as a fallback.
-        SEL currentContextSelector = NSSelectorFromString(@"currentContext");
-        if (class_getClassMethod(contextClass, currentContextSelector)) {
-            id currentContext = ((id (*)(id, SEL))objc_msgSend)((id)contextClass,
-                                                                 currentContextSelector);
-            if (currentContext && ![contexts containsObject:currentContext]) {
-                [contexts addObject:currentContext];
-            }
-        }
+        // Prefer the logged-in user's context, then inspect every known context.
+        KWAddContext(contexts, visited, KWSendObject0((id)contextClass, @"activeUserContext"));
+        KWAddContext(contexts, visited, KWSendObject0((id)contextClass, @"currentContext"));
+        KWAddContext(contexts, visited, KWSendObject0((id)contextClass, @"lastContext"));
+        KWAddContext(contexts, visited, KWSendObject0((id)contextClass, @"rootContext"));
     }
 
     Class contextManagerClass = objc_getClass("MMContextManager");
     id contextManager = KWSendObject0((id)contextManagerClass, @"defaultManager");
-    id managerActiveContext = KWSendObject0(contextManager, @"activeUserContext");
-    if (managerActiveContext && ![contexts containsObject:managerActiveContext]) {
-        [contexts addObject:managerActiveContext];
+    KWAddContext(contexts, visited, KWSendObject0(contextManager, @"activeUserContext"));
+    id allContexts = KWSendObject0(contextManager, @"allContexts");
+    if ([allContexts isKindOfClass:[NSArray class]]) {
+        for (id context in (NSArray *)allContexts) {
+            KWAddContext(contexts, visited, context);
+        }
     }
 
+    NSUInteger registeredContextCount = 0;
+    NSUInteger registeredCenterCount = 0;
     for (id context in contexts) {
+        if (KWSendBool1(context, @"isServiceExist:", (id)serviceClass)) {
+            registeredContextCount++;
+        }
         id service = KWSendObject1(context, @"getService:", (id)serviceClass);
         if (service) return service;
 
         id serviceCenter = KWSendObject0(context, @"serviceCenter");
+        if (KWSendBool1(serviceCenter, @"isServiceExist:", (id)serviceClass)) {
+            registeredCenterCount++;
+        }
         service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
         if (service) return service;
     }
 
-    Class serviceCenterClass = objc_getClass("MMServiceCenter");
-    id serviceCenter = KWSendObject0((id)serviceCenterClass, @"defaultCenter");
-    id service = KWSendObject1(serviceCenter, @"getService:", (id)serviceClass);
-    if (!service) {
-        NSLog(@"[WeChatKeywordCleaner] Could not resolve %@ from active/current contexts",
-              className);
+    if ([className isEqualToString:@"FTSMessageMgr"]) {
+        NSString *diagnostic = [NSString stringWithFormat:
+                                @"已检查 %lu 个 MMContext；%lu 个报告已注册 FTSMessageMgr，%lu 个 serviceCenter 报告已注册，但均未返回实例。",
+                                (unsigned long)contexts.count,
+                                (unsigned long)registeredContextCount,
+                                (unsigned long)registeredCenterCount];
+        KWSetSearchDiagnostic(diagnostic);
     }
-    return service;
+    NSLog(@"[WeChatKeywordCleaner] Could not resolve %@ across %lu contexts",
+          className, (unsigned long)contexts.count);
+    return nil;
 }
 
 static id KWGetMessageSearchManager(void) {
     id messageSearchService = KWGetService(@"FTSMessageMgr");
     if (!messageSearchService) {
-        KWSetSearchDiagnostic(@"无法从当前 MMContext 取得 FTSMessageMgr 服务。");
+        if (!KWGetSearchDiagnostic().length) {
+            KWSetSearchDiagnostic(@"无法从微信上下文取得 FTSMessageMgr 服务。");
+        }
         return nil;
     }
 
@@ -178,7 +200,9 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
 static id KWDirectFTSQuery(NSString *keyword) {
     id messageSearchService = KWGetService(@"FTSMessageMgr");
     if (!messageSearchService) {
-        KWSetSearchDiagnostic(@"MMContext 未返回 FTSMessageMgr；尚未访问聊天记录索引。");
+        if (!KWGetSearchDiagnostic().length) {
+            KWSetSearchDiagnostic(@"微信上下文未返回 FTSMessageMgr；尚未访问聊天记录索引。");
+        }
         return nil;
     }
 
