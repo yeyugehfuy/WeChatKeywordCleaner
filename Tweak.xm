@@ -1,42 +1,41 @@
-// Tweak.xm —— 等微信窗口就绪后显示悬浮按钮
+// Add a native entry to WeChat's Settings navigation bar; no floating overlay.
 #import "WeChatKeywordCleaner.h"
+#import <objc/runtime.h>
 
-static NSUInteger KWButtonAttemptGeneration = 0;
+%hook NewSettingViewController
 
-static void KWAttemptToShowButton(NSUInteger generation, NSUInteger attempt) {
-    if (generation != KWButtonAttemptGeneration) return;
+- (void)viewDidLoad {
+    %orig;
 
-    ShowKeywordCleanerFloatingButton();
+    UINavigationItem *navigationItem = self.navigationItem;
+    if (!navigationItem) return;
 
-    // The injected library may load before WeChat creates its active UIWindow.
-    // Retry for up to one minute; the UI helper guards against duplicate buttons.
-    if (attempt >= 60) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        KWAttemptToShowButton(generation, attempt + 1);
-    });
+    NSMutableArray<UIBarButtonItem *> *items =
+        [navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
+    for (UIBarButtonItem *item in items) {
+        if ([item.accessibilityIdentifier isEqualToString:@"WeChatKeywordCleaner.SettingsEntry"]) {
+            return;
+        }
+    }
+
+    Class cleanerClass = objc_getClass("KeywordCleanerViewController");
+    if (!cleanerClass) {
+        NSLog(@"[WeChatKeywordCleaner] Cleaner UI class is not loaded");
+        return;
+    }
+
+    UIBarButtonItem *entry =
+        [[UIBarButtonItem alloc] initWithTitle:@"清理"
+                                         style:UIBarButtonItemStylePlain
+                                        target:cleanerClass
+                                        action:NSSelectorFromString(@"presentCleaner")];
+    entry.accessibilityIdentifier = @"WeChatKeywordCleaner.SettingsEntry";
+    [items addObject:entry];
+    navigationItem.rightBarButtonItems = items;
 }
 
-static void KWStartButtonAttempts(void) {
-    KWButtonAttemptGeneration++;
-    KWAttemptToShowButton(KWButtonAttemptGeneration, 0);
-}
+%end
 
 %ctor {
     %init;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter]
-         addObserverForName:UIApplicationDidBecomeActiveNotification
-         object:nil
-         queue:[NSOperationQueue mainQueue]
-         usingBlock:^(__unused NSNotification *notification) {
-            KWStartButtonAttempts();
-        }];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            KWStartButtonAttempts();
-        });
-    });
 }
-
