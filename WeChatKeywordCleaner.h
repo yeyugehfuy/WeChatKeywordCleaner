@@ -1,18 +1,7 @@
 // WeChatKeywordCleaner.h
-// Shared declarations: floating button entry point and search/delete bridge.
+// Shared declarations for the in-app search and delete UI.
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-// Add the "清" floating button inside WeChat.
-void ShowKeywordCleanerFloatingButton(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 @interface WeChatBridge : NSObject
 // Results are dictionaries containing msgId, talker, and content.
