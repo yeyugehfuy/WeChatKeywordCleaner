@@ -607,7 +607,6 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
 
         NSMutableDictionary<NSString *, NSMutableDictionary *> *groups = [NSMutableDictionary dictionary];
         NSMutableSet<NSString *> *seen = [NSMutableSet set];
-        NSString *batchTalker = nil;
         @try {
             // Re-fetch and re-check each selected message immediately before deletion.
             // Any row that cannot be proven to contain its exact keyword aborts the whole batch.
@@ -627,12 +626,8 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
                     if (completion) completion(NO);
                     return;
                 }
-                if (batchTalker && ![batchTalker isEqualToString:talker]) {
-                    NSLog(@"[WeChatKeywordCleaner] Refusing a mixed-chat deletion batch");
-                    if (completion) completion(NO);
-                    return;
-                }
-                batchTalker = talker;
+                // Mixed-chat selections are grouped by talker below. Every message
+                // is re-fetched and keyword-checked before any group is submitted.
 
                 NSString *uniqueKey = [NSString stringWithFormat:@"%@:%u", talker, localID];
                 if ([seen containsObject:uniqueKey]) continue;
@@ -670,7 +665,8 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
                 return;
             }
 
-            for (NSString *talker in groups) {
+            NSArray<NSString *> *talkers = [groups.allKeys sortedArrayUsingSelector:@selector(compare:)];
+            for (NSString *talker in talkers) {
                 KWSendDeleteBatch(messageManager, deleteSelector, talker, groups[talker][@"wraps"]);
             }
         } @catch (NSException *exception) {
