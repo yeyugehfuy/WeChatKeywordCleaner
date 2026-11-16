@@ -72,7 +72,7 @@
     self.summaryLabel.font = [UIFont systemFontOfSize:12];
     self.summaryLabel.textColor = [UIColor secondaryLabelColor];
     self.summaryLabel.numberOfLines = 2;
-    self.summaryLabel.text = @"搜索结果按消息原文精确匹配。点选消息后才会进入删除清单；选中后会删除整条消息。";
+    self.summaryLabel.text = @"搜索结果按消息原文精确匹配。可逐条选择或全选当前结果；删除会整条移除消息。";
     [self.view addSubview:self.summaryLabel];
 
     self.tableView = [[UITableView alloc]
@@ -336,7 +336,7 @@
                          (unsigned long)chats.count,
                          [chatLines componentsJoinedByString:@"\n"]];
     UIAlertController *confirm =
-        [UIAlertController alertControllerWithTitle:@"确认删除已勾选消息？"
+        [UIAlertController alertControllerWithTitle:@"确认删除当前选中消息？"
                                             message:message
                                      preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"取消"
@@ -371,7 +371,7 @@
                 self.scopeBtn.enabled = self.allResults.count > 0;
                 UIAlertController *failed =
                     [UIAlertController alertControllerWithTitle:@"删除未能确认完成"
-                                                        message:@"请重新搜索并核对结果。没有通过原文关键词校验的消息不会被提交删除。"
+                                                        message:@"请重新搜索并核对结果。多聊天批量操作若中途失败，可能已有部分聊天完成删除；未通过原文关键词校验的消息不会提交删除。"
                                                  preferredStyle:UIAlertControllerStyleAlert];
                 [failed addAction:[UIAlertAction actionWithTitle:@"知道了"
                                                           style:UIAlertActionStyleDefault
