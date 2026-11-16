@@ -1,5 +1,5 @@
 // KeywordCleanerUI.m —— 微信内的关键字清理界面
-// 搜索结果先按消息原文精确筛选；删除必须逐条手动勾选。
+// 搜索结果先按消息原文精确筛选；支持逐条选择或全选当前结果。
 
 #import "WeChatKeywordCleaner.h"
 
@@ -8,6 +8,7 @@
 @property (nonatomic, strong) UITextField *keywordField;
 @property (nonatomic, strong) UIButton *searchBtn;
 @property (nonatomic, strong) UIButton *deleteBtn;
+@property (nonatomic, strong) UIBarButtonItem *selectAllItem;
 @property (nonatomic, strong) UIButton *scopeBtn;
 @property (nonatomic, strong) UILabel *summaryLabel;
 @property (nonatomic, strong) UITableView *tableView;
@@ -91,6 +92,12 @@
                                          style:UIBarButtonItemStylePlain
                                         target:self
                                         action:@selector(dismissSelf)];
+    self.selectAllItem = [[UIBarButtonItem alloc] initWithTitle:@"全选"
+                                                          style:UIBarButtonItemStylePlain
+                                                         target:self
+                                                         action:@selector(toggleSelectAll)];
+    self.selectAllItem.enabled = NO;
+    self.navigationItem.rightBarButtonItem = self.selectAllItem;
 }
 
 - (void)dismissSelf {
@@ -128,6 +135,24 @@
     [self.deleteBtn setTitle:[NSString stringWithFormat:@"删除已选（%lu）", (unsigned long)count]
                      forState:UIControlStateNormal];
     self.deleteBtn.enabled = count > 0;
+    BOOL hasResults = self.results.count > 0;
+    self.selectAllItem.enabled = hasResults;
+    BOOL allSelected = hasResults && count == self.results.count;
+    [self.selectAllItem setTitle:allSelected ? @"取消全选" : @"全选"];
+}
+
+- (void)toggleSelectAll {
+    if (!self.results.count) return;
+    if ([self selectedCount] == self.results.count) {
+        [self.selectedKeys removeAllObjects];
+    } else {
+        for (NSDictionary *record in self.results) {
+            NSString *key = [self keyForRecord:record];
+            if (key) [self.selectedKeys addObject:key];
+        }
+    }
+    [self.tableView reloadData];
+    [self updateDeleteButton];
 }
 
 - (void)updateSummary {
@@ -140,7 +165,7 @@
     NSString *keyword = [self.keywordField.text stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
     self.summaryLabel.text = [NSString stringWithFormat:
-                              @"原文精确包含“%@”：%lu 条消息，来自 %lu 个聊天。只删除你逐条勾选的消息；勾选后整条删除。",
+                              @"原文精确包含“%@”：%lu 条消息，来自 %lu 个聊天。可逐条勾选或全选当前结果；删除会整条移除消息。",
                               keyword,
                               (unsigned long)self.results.count,
                               (unsigned long)talkers.count];
@@ -236,7 +261,7 @@
 
     UIAlertController *picker =
         [UIAlertController alertControllerWithTitle:@"筛选聊天范围"
-                                            message:@"筛选只影响当前列表；删除仍需逐条勾选。"
+                                            message:@"筛选只影响当前列表；可逐条选择或全选当前结果。"
                                      preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
     [picker addAction:[UIAlertAction actionWithTitle:@"全部聊天"
@@ -284,23 +309,12 @@
         NSString *talker = record[@"__talker"] ?: record[@"talker"];
         if (talker.length) chats[talker] = record[@"displayName"] ?: talker;
     }
-    if (chats.count != 1) {
-        UIAlertController *scopeRequired =
-            [UIAlertController alertControllerWithTitle:@"请一次处理一个聊天"
-                                                message:@"当前勾选项跨越了多个聊天。请先用“聊天范围”筛选到一个聊天，再逐条勾选要删除的消息。"
-                                         preferredStyle:UIAlertControllerStyleAlert];
-        [scopeRequired addAction:[UIAlertAction actionWithTitle:@"知道了"
-                                                          style:UIAlertActionStyleDefault
-                                                        handler:nil]];
-        [self presentViewController:scopeRequired animated:YES completion:nil];
-        return;
-    }
     NSArray<NSString *> *sortedTalkers = [chats.allKeys sortedArrayUsingComparator:
                                           ^NSComparisonResult(NSString *left, NSString *right) {
         return [chats[left] localizedCaseInsensitiveCompare:chats[right]];
     }];
     NSMutableArray<NSString *> *chatLines = [NSMutableArray array];
-    NSUInteger shown = MIN((NSUInteger)1, sortedTalkers.count);
+    NSUInteger shown = MIN((NSUInteger)5, sortedTalkers.count);
     for (NSUInteger index = 0; index < shown; index++) {
         NSString *talker = sortedTalkers[index];
         NSString *displayName = chats[talker] ?: talker;
@@ -308,9 +322,18 @@
          ? displayName
          : [NSString stringWithFormat:@"%@（%@）", displayName, talker]];
     }
+    if (sortedTalkers.count > shown) {
+        [chatLines addObject:[NSString stringWithFormat:@"另外 %lu 个聊天",
+                              (unsigned long)(sortedTalkers.count - shown)]];
+    }
+    NSString *selectionLabel = selected.count == self.results.count
+                               ? @"当前列表全部匹配项"
+                               : @"已勾选项";
     NSString *message = [NSString stringWithFormat:
-                         @"将整条删除你勾选的 %lu 条消息，聊天对象：\n%@\n\n删除后无法在此插件中撤销。",
+                         @"将整条删除%@中的 %lu 条消息，涉及 %lu 个聊天：\n%@\n\n删除后无法撤销。",
+                         selectionLabel,
                          (unsigned long)selected.count,
+                         (unsigned long)chats.count,
                          [chatLines componentsJoinedByString:@"\n"]];
     UIAlertController *confirm =
         [UIAlertController alertControllerWithTitle:@"确认删除已勾选消息？"
