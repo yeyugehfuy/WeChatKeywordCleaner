@@ -337,8 +337,8 @@ static NSString *KWDescribeSearchEnvironment(void) {
     }
 
     return [NSString stringWithFormat:
-            @"环境核验：%@ / iOS %ld.%ld.%ld；账号 %@；FTSFacade %@；消息索引 %@。%@",
-            bundleID, (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
+            @"环境核验：微信 %@（%@）/ iOS %ld.%ld.%ld；账号 %@；FTSFacade %@；消息索引 %@。%@",
+            version, bundleID, (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
             loggedIn ? @"已登录" : @"未确认登录",
             facade ? @"已取得" : @"未取得",
             indexState,
