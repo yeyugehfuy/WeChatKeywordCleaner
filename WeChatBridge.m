@@ -249,6 +249,7 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
 
 static id KWDirectFTSQuery(NSString *keyword) {
     NSMutableArray<NSString *> *failures = [NSMutableArray array];
+    NSMutableArray *combinedRoots = [NSMutableArray array];
 
     id facade = KWGetService(@"FTSFacade");
     id regularManager = KWSendObject0(facade, @"ftsMessageMgr");
@@ -261,8 +262,8 @@ static id KWDirectFTSQuery(NSString *keyword) {
     if (regularDatabase && [regularDatabase respondsToSelector:regularSelector]) {
         @try {
             id result = KWSendObject3(regularDatabase, regularSelector, keyword, nil, nil);
-            if (result) return result;
-            [failures addObject:@"普通消息索引已取得，但查询返回空结果。"];
+            if (result) [combinedRoots addObject:result];
+            else [failures addObject:@"普通消息索引查询未返回结果对象。"];
         } @catch (NSException *exception) {
             [failures addObject:[NSString stringWithFormat:@"普通消息索引查询异常：%@", exception.name]];
         }
@@ -271,6 +272,8 @@ static id KWDirectFTSQuery(NSString *keyword) {
         [failures addObject:diagnostic.length ? diagnostic : @"未取得普通消息索引数据库。"];
     }
 
+    // Always query the intelligent index too: the regular database can return an
+    // empty result container even when the native intelligent index has matches.
     id intelligentManager = KWSendObject0(facade, @"ftsIntelligentMessageMgr");
     id intelligentDatabase = KWSendObject0(facade, @"getSharedFTSIntelligentMessageDB");
     if (!intelligentDatabase) intelligentDatabase = KWSendObject0(intelligentManager, @"ftsMessageDB");
@@ -282,8 +285,8 @@ static id KWDirectFTSQuery(NSString *keyword) {
         @try {
             // Search type 0 selects the native API's general text query mode.
             id result = KWSendObject4(intelligentDatabase, intelligentSelector, keyword, nil, 0, nil);
-            if (result) return result;
-            [failures addObject:@"智能消息索引已取得，但查询返回空结果。"];
+            if (result) [combinedRoots addObject:result];
+            else [failures addObject:@"智能消息索引查询未返回结果对象。"];
         } @catch (NSException *exception) {
             [failures addObject:[NSString stringWithFormat:@"智能消息索引查询异常：%@", exception.name]];
         }
@@ -292,6 +295,7 @@ static id KWDirectFTSQuery(NSString *keyword) {
         [failures addObject:diagnostic.length ? diagnostic : @"未取得智能消息索引数据库。"];
     }
 
+    if (combinedRoots.count) return combinedRoots;
     KWSetSearchDiagnostic([failures componentsJoinedByString:@"；"]);
     return nil;
 }
