@@ -68,6 +68,12 @@ static void KWAddContext(NSMutableArray *contexts, NSHashTable *visited, id cont
     [contexts addObject:context];
 }
 
+static BOOL KWSendBool0(id target, NSString *selectorName) {
+    SEL selector = NSSelectorFromString(selectorName);
+    if (!target || ![target respondsToSelector:selector]) return NO;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(target, selector);
+}
+
 static BOOL KWSendBool1(id target, NSString *selectorName, id arg1) {
     SEL selector = NSSelectorFromString(selectorName);
     if (!target || ![target respondsToSelector:selector]) return NO;
@@ -120,7 +126,8 @@ static id KWGetService(NSString *className) {
         if (service) return service;
     }
 
-    if ([className isEqualToString:@"FTSMessageMgr"] ||
+    if ([className isEqualToString:@"FTSFacade"] ||
+        [className isEqualToString:@"FTSMessageMgr"] ||
         [className isEqualToString:@"FTSIntelligentMessageMgr"]) {
         NSString *diagnostic = [NSString stringWithFormat:
                                 @"%@：检查 %lu 个 MMContext，已注册 %lu 个，serviceCenter 已注册 %lu 个，均未返回实例。",
@@ -135,52 +142,70 @@ static id KWGetService(NSString *className) {
     return nil;
 }
 
+static id KWCreateSearchManager(id managerOwner, id database, NSString *managerClassName) {
+    if (!managerOwner) return nil;
+    id searchManager = KWSendObject0(managerOwner, @"searchMgr");
+    if (searchManager || !database) return searchManager;
+
+    Class searchManagerClass = objc_getClass(managerClassName.UTF8String);
+    if (!searchManagerClass) return nil;
+    id allocated = KWSendObject0((id)searchManagerClass, @"alloc");
+    searchManager = KWSendObject1(allocated, @"initWithDB:", database);
+    if (searchManager) KWSendObject1(managerOwner, @"setSearchMgr:", searchManager);
+    return searchManager;
+}
+
 static id KWGetMessageSearchManager(void) {
+    NSMutableArray<NSString *> *failures = [NSMutableArray array];
+
+    // FTSFacade owns the live search managers and provides the shared databases.
+    id facade = KWGetService(@"FTSFacade");
+    if (facade) {
+        id managerOwner = KWSendObject0(facade, @"ftsMessageMgr");
+        id database = KWSendObject0(managerOwner, @"ftsMessageDB");
+        if (!database) database = KWSendObject0(facade, @"getSharedFTSMessageDB");
+        id searchManager = KWCreateSearchManager(managerOwner, database, @"FTSMsgSearchMgr");
+        if (searchManager) {
+            KWSetSearchDiagnostic(@"已通过微信 FTSFacade 取得普通消息搜索管理器。");
+            return searchManager;
+        }
+
+        managerOwner = KWSendObject0(facade, @"ftsIntelligentMessageMgr");
+        database = KWSendObject0(managerOwner, @"ftsMessageDB");
+        if (!database) database = KWSendObject0(facade, @"getSharedFTSIntelligentMessageDB");
+        searchManager = KWCreateSearchManager(managerOwner, database, @"FTSIntelligentMsgSearchMgr");
+        if (searchManager) {
+            KWSetSearchDiagnostic(@"已通过微信 FTSFacade 取得智能消息搜索管理器。");
+            return searchManager;
+        }
+        [failures addObject:@"FTSFacade 已取得，但未返回消息管理器或共享数据库。"];
+    } else {
+        [failures addObject:KWGetSearchDiagnostic() ?: @"未取得 FTSFacade。"];
+    }
+
     NSArray<NSDictionary<NSString *, NSString *> *> *backends = @[
         @{@"service": @"FTSMessageMgr", @"manager": @"FTSMsgSearchMgr"},
         @{@"service": @"FTSIntelligentMessageMgr", @"manager": @"FTSIntelligentMsgSearchMgr"}
     ];
-    NSMutableArray<NSString *> *failures = [NSMutableArray array];
-
     for (NSDictionary<NSString *, NSString *> *backend in backends) {
         NSString *serviceName = backend[@"service"];
-        NSString *managerName = backend[@"manager"];
         id service = KWGetService(serviceName);
         if (!service) {
             NSString *diagnostic = KWGetSearchDiagnostic();
             if (diagnostic.length) [failures addObject:diagnostic];
             continue;
         }
-
-        id searchManager = KWSendObject0(service, @"searchMgr");
-        if (searchManager) {
-            KWSetSearchDiagnostic([NSString stringWithFormat:@"已取得 %@ 的原生搜索管理器。", serviceName]);
-            return searchManager;
-        }
-
         id database = KWSendObject0(service, @"ftsMessageDB");
-        Class searchManagerClass = objc_getClass(managerName.UTF8String);
-        if (!database || !searchManagerClass) {
-            [failures addObject:[NSString stringWithFormat:
-                                 @"%@ 已取得，但数据库或搜索管理器类为空。", serviceName]];
-            continue;
-        }
-
-        id allocated = KWSendObject0((id)searchManagerClass, @"alloc");
-        searchManager = KWSendObject1(allocated, @"initWithDB:", database);
+        id searchManager = KWCreateSearchManager(service, database, backend[@"manager"]);
         if (searchManager) {
-            KWSendObject1(service, @"setSearchMgr:", searchManager);
-            KWSetSearchDiagnostic([NSString stringWithFormat:@"已初始化 %@ 原生搜索管理器。", serviceName]);
+            KWSetSearchDiagnostic([NSString stringWithFormat:@"已取得 %@ 原生搜索管理器。", serviceName]);
             return searchManager;
         }
-        [failures addObject:[NSString stringWithFormat:@"%@ 搜索管理器初始化失败。", serviceName]];
+        [failures addObject:[NSString stringWithFormat:@"%@ 已取得，但搜索管理器或索引数据库为空。", serviceName]];
     }
 
-    if (failures.count) {
-        KWSetSearchDiagnostic([failures componentsJoinedByString:@"；"]);
-    } else {
-        KWSetSearchDiagnostic(@"微信未提供可用的消息全文搜索服务。");
-    }
+    KWSetSearchDiagnostic(failures.count ? [failures componentsJoinedByString:@"；"] :
+                          @"微信未提供可用的消息全文搜索入口。");
     return nil;
 }
 
@@ -223,51 +248,101 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
 }
 
 static id KWDirectFTSQuery(NSString *keyword) {
-    NSString *regularFailure = nil;
-    id service = KWGetService(@"FTSMessageMgr");
-    if (service) {
-        id database = KWSendObject0(service, @"ftsMessageDB");
-        SEL querySelector = NSSelectorFromString(@"queryText:limitUsrname:cancelBlock:");
-        if (database && [database respondsToSelector:querySelector]) {
-            @try {
-                id result = KWSendObject3(database, querySelector, keyword, nil, nil);
-                if (result) return result;
-                regularFailure = @"FTSMessageMgr 查询返回空结果";
-            } @catch (NSException *exception) {
-                regularFailure = [NSString stringWithFormat:@"FTSMessageMgr 查询异常：%@", exception.name];
-            }
-        } else {
-            regularFailure = @"FTSMessageMgr 没有可用的 ftsMessageDB/queryText 接口";
+    NSMutableArray<NSString *> *failures = [NSMutableArray array];
+
+    id facade = KWGetService(@"FTSFacade");
+    id regularManager = KWSendObject0(facade, @"ftsMessageMgr");
+    id regularDatabase = KWSendObject0(facade, @"getSharedFTSMessageDB");
+    if (!regularDatabase) regularDatabase = KWSendObject0(regularManager, @"ftsMessageDB");
+    id regularService = KWGetService(@"FTSMessageMgr");
+    if (!regularDatabase) regularDatabase = KWSendObject0(regularService, @"ftsMessageDB");
+
+    SEL regularSelector = NSSelectorFromString(@"queryText:limitUsrname:cancelBlock:");
+    if (regularDatabase && [regularDatabase respondsToSelector:regularSelector]) {
+        @try {
+            id result = KWSendObject3(regularDatabase, regularSelector, keyword, nil, nil);
+            if (result) return result;
+            [failures addObject:@"普通消息索引已取得，但查询返回空结果。"];
+        } @catch (NSException *exception) {
+            [failures addObject:[NSString stringWithFormat:@"普通消息索引查询异常：%@", exception.name]];
         }
     } else {
-        regularFailure = KWGetSearchDiagnostic();
+        NSString *diagnostic = KWGetSearchDiagnostic();
+        [failures addObject:diagnostic.length ? diagnostic : @"未取得普通消息索引数据库。"];
     }
 
+    id intelligentManager = KWSendObject0(facade, @"ftsIntelligentMessageMgr");
+    id intelligentDatabase = KWSendObject0(facade, @"getSharedFTSIntelligentMessageDB");
+    if (!intelligentDatabase) intelligentDatabase = KWSendObject0(intelligentManager, @"ftsMessageDB");
     id intelligentService = KWGetService(@"FTSIntelligentMessageMgr");
-    if (intelligentService) {
-        id database = KWSendObject0(intelligentService, @"ftsMessageDB");
-        SEL querySelector = NSSelectorFromString(@"queryText:limitUsrname:searchType:cancelBlock:");
-        if (database && [database respondsToSelector:querySelector]) {
-            @try {
-                // Search type 0 is the default text-search path in this API.
-                id result = KWSendObject4(database, querySelector, keyword, nil, 0, nil);
-                if (result) return result;
-                KWSetSearchDiagnostic(@"FTSIntelligentMessageMgr 的文本查询返回空结果。");
-            } @catch (NSException *exception) {
-                KWSetSearchDiagnostic([NSString stringWithFormat:
-                                       @"FTSIntelligentMessageMgr 查询异常：%@", exception.name]);
-            }
-        } else {
-            KWSetSearchDiagnostic(@"FTSIntelligentMessageMgr 已取得，但数据库或文本查询接口为空。");
+    if (!intelligentDatabase) intelligentDatabase = KWSendObject0(intelligentService, @"ftsMessageDB");
+
+    SEL intelligentSelector = NSSelectorFromString(@"queryText:limitUsrname:searchType:cancelBlock:");
+    if (intelligentDatabase && [intelligentDatabase respondsToSelector:intelligentSelector]) {
+        @try {
+            // Search type 0 selects the native API's general text query mode.
+            id result = KWSendObject4(intelligentDatabase, intelligentSelector, keyword, nil, 0, nil);
+            if (result) return result;
+            [failures addObject:@"智能消息索引已取得，但查询返回空结果。"];
+        } @catch (NSException *exception) {
+            [failures addObject:[NSString stringWithFormat:@"智能消息索引查询异常：%@", exception.name]];
         }
     } else {
-        NSString *intelligentFailure = KWGetSearchDiagnostic();
-        KWSetSearchDiagnostic([NSString stringWithFormat:@"%@；普通消息索引：%@；智能消息索引：%@",
-                               @"直接搜索未执行",
-                               regularFailure ?: @"不可用",
-                               intelligentFailure.length ? intelligentFailure : @"服务未注册"]);
+        NSString *diagnostic = KWGetSearchDiagnostic();
+        [failures addObject:diagnostic.length ? diagnostic : @"未取得智能消息索引数据库。"];
     }
+
+    KWSetSearchDiagnostic([failures componentsJoinedByString:@"；"]);
     return nil;
+}
+
+static NSString *KWDescribeSearchEnvironment(void) {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary ?: @{};
+    NSString *version = info[@"CFBundleShortVersionString"] ?: @"未知";
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier ?: @"未知";
+    NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+    Class contextClass = objc_getClass("MMContext");
+    BOOL loggedIn = KWSendBool0((id)contextClass, @"isLoggedIn");
+
+    id facade = KWGetService(@"FTSFacade");
+    id messageManager = KWSendObject0(facade, @"ftsMessageMgr");
+    id database = KWSendObject0(facade, @"getSharedFTSMessageDB");
+    if (!database) database = KWSendObject0(messageManager, @"ftsMessageDB");
+    if (!database) {
+        id service = KWGetService(@"FTSMessageMgr");
+        database = KWSendObject0(service, @"ftsMessageDB");
+        if (!messageManager) messageManager = service;
+    }
+
+    uint32_t messageCount = KWSendUInt0(database, @"getMsgIndexCount");
+    uint32_t sessionCount = KWSendUInt0(database, @"getFTSSessionCount");
+    BOOL hasAllIndex = KWSendBool0(messageManager, @"hasCreateAllIndex");
+    uint32_t notReadySessions = KWSendUInt0(messageManager, @"getIndexNotReadyCount");
+
+    NSString *indexState = @"未取得";
+    if (database) {
+        indexState = [NSString stringWithFormat:@"已取得，消息索引 %u 条 / 会话 %u 个；hasCreateAllIndex=%@，notReady=%u",
+                      messageCount, sessionCount, hasAllIndex ? @"1" : @"0", notReadySessions];
+    }
+
+    NSMutableArray<NSString *> *advice = [NSMutableArray array];
+    if (!loggedIn) {
+        [advice addObject:@"请先在手机微信登录账号后再搜索。"];
+    } else if (!database || (messageCount == 0 && sessionCount == 0)) {
+        [advice addObject:@"本机没有可查询的微信消息索引。请在微信「我 > 设置 > 通用 > 聊天记录迁移与备份」把记录同步到这台手机，再回到微信保持前台等待索引。"];
+    } else if (!hasAllIndex || notReadySessions > 0) {
+        [advice addObject:@"微信索引尚未就绪；让微信保持前台运行，待索引完成后再搜索。"];
+    } else {
+        [advice addObject:@"本机已有索引；若微信原生搜索能命中而这里为 0，说明插件查询入口没有拿到原生候选，不需要重复同步记录。"];
+    }
+
+    return [NSString stringWithFormat:
+            @"环境核验：%@ / iOS %ld.%ld.%ld；账号 %@；FTSFacade %@；消息索引 %@。%@",
+            bundleID, (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion,
+            loggedIn ? @"已登录" : @"未确认登录",
+            facade ? @"已取得" : @"未取得",
+            indexState,
+            [advice componentsJoinedByString:@""]];
 }
 
 static NSArray *KWResolveFTSItems(NSArray *items, NSString *keyword) {
@@ -363,11 +438,13 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
         KWSetSearchDiagnostic([NSString stringWithFormat:@"已找到 %lu 条原文精确匹配。", (unsigned long)results.count]);
     } else {
         NSString *detail = directFailure.length ? directFailure : @"没有得到可核验的匹配消息。";
+        NSString *environment = KWDescribeSearchEnvironment();
         KWSetSearchDiagnostic([NSString stringWithFormat:
-                               @"异步候选：%lu 条；备用索引候选：%lu 条；原文精确匹配：0 条。%@",
+                               @"异步候选：%lu 条；备用索引候选：%lu 条；原文精确匹配：0 条。%@\n%@",
                                (unsigned long)primaryCandidates,
                                (unsigned long)directCandidates,
-                               detail]);
+                               detail,
+                               environment]);
     }
 
     NSLog(@"[WeChatKeywordCleaner] Search candidates primary=%lu direct=%lu exact=%lu",
