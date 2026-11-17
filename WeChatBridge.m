@@ -250,6 +250,7 @@ static void KWAppendFTSItems(id object, NSMutableArray *items, NSHashTable *visi
 static id KWDirectFTSQuery(NSString *keyword) {
     NSMutableArray<NSString *> *failures = [NSMutableArray array];
     NSMutableArray *combinedRoots = [NSMutableArray array];
+    NSMutableArray<NSString *> *queriedIndexes = [NSMutableArray array];
 
     id facade = KWGetService(@"FTSFacade");
     id regularManager = KWSendObject0(facade, @"ftsMessageMgr");
@@ -262,7 +263,10 @@ static id KWDirectFTSQuery(NSString *keyword) {
     if (regularDatabase && [regularDatabase respondsToSelector:regularSelector]) {
         @try {
             id result = KWSendObject3(regularDatabase, regularSelector, keyword, nil, nil);
-            if (result) [combinedRoots addObject:result];
+            if (result) {
+                [combinedRoots addObject:result];
+                [queriedIndexes addObject:@"普通消息索引"];
+            }
             else [failures addObject:@"普通消息索引查询未返回结果对象。"];
         } @catch (NSException *exception) {
             [failures addObject:[NSString stringWithFormat:@"普通消息索引查询异常：%@", exception.name]];
@@ -285,7 +289,10 @@ static id KWDirectFTSQuery(NSString *keyword) {
         @try {
             // Search type 0 selects the native API's general text query mode.
             id result = KWSendObject4(intelligentDatabase, intelligentSelector, keyword, nil, 0, nil);
-            if (result) [combinedRoots addObject:result];
+            if (result) {
+                [combinedRoots addObject:result];
+                [queriedIndexes addObject:@"智能消息索引"];
+            }
             else [failures addObject:@"智能消息索引查询未返回结果对象。"];
         } @catch (NSException *exception) {
             [failures addObject:[NSString stringWithFormat:@"智能消息索引查询异常：%@", exception.name]];
@@ -295,7 +302,11 @@ static id KWDirectFTSQuery(NSString *keyword) {
         [failures addObject:diagnostic.length ? diagnostic : @"未取得智能消息索引数据库。"];
     }
 
-    if (combinedRoots.count) return combinedRoots;
+    if (combinedRoots.count) {
+        KWSetSearchDiagnostic([NSString stringWithFormat:@"备用索引查询路径：%@。",
+                               [queriedIndexes componentsJoinedByString:@"、"]]);
+        return combinedRoots;
+    }
     KWSetSearchDiagnostic([failures componentsJoinedByString:@"；"]);
     return nil;
 }
@@ -396,8 +407,7 @@ static NSArray *KWResolveFTSItems(NSArray *items, NSString *keyword) {
             @"__talker": talker,
             @"__localID": @(localID),
             @"__keyword": keyword,
-            @"__indexOnly": @(indexOnly),
-            @"__msgWrap": wrap ?: [NSNull null]
+            @"__indexOnly": @(indexOnly)
         }];
     }
     return results;
@@ -435,13 +445,27 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
         if (directRoot) KWAppendFTSItems(directRoot, directItems, directVisited);
         directCandidates = directItems.count;
         if (directItems.count) results = KWResolveFTSItems(directItems, keyword);
-        if (!directRoot) directFailure = KWGetSearchDiagnostic();
+        directFailure = KWGetSearchDiagnostic();
     }
 
     if (results.count) {
-        KWSetSearchDiagnostic([NSString stringWithFormat:@"已找到 %lu 条原文精确匹配。", (unsigned long)results.count]);
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        if (primaryCandidates) [paths addObject:@"异步搜索结果树"];
+        if (directCandidates) {
+            NSString *directPath = KWGetSearchDiagnostic();
+            [paths addObject:directPath.length ? directPath : @"备用全文索引"];
+        }
+        if (!paths.count) {
+            NSString *managerPath = KWGetSearchDiagnostic();
+            if (managerPath.length) [paths addObject:managerPath];
+        }
+        KWSetSearchDiagnostic([NSString stringWithFormat:
+                               @"已找到 %lu 条原文精确匹配。候选路径：%@。",
+                               (unsigned long)results.count,
+                               paths.count ? [paths componentsJoinedByString:@"；"] : @"未记录"]);
     } else {
-        NSString *detail = directFailure.length ? directFailure : @"没有得到可核验的匹配消息。";
+        NSString *detail = directFailure.length ? directFailure : KWGetSearchDiagnostic();
+        if (!detail.length) detail = @"没有得到可核验的匹配消息。";
         NSString *environment = KWDescribeSearchEnvironment();
         KWSetSearchDiagnostic([NSString stringWithFormat:
                                @"异步候选：%lu 条；备用索引候选：%lu 条；原文精确匹配：0 条。%@\n%@",
@@ -451,10 +475,11 @@ static NSArray *KWBuildSearchResults(id handler, NSString *keyword) {
                                environment]);
     }
 
-    NSLog(@"[WeChatKeywordCleaner] Search candidates primary=%lu direct=%lu exact=%lu",
+    NSLog(@"[WeChatKeywordCleaner] Search candidates primary=%lu direct=%lu exact=%lu diagnostic=%@",
           (unsigned long)primaryCandidates,
           (unsigned long)directCandidates,
-          (unsigned long)results.count);
+          (unsigned long)results.count,
+          KWGetSearchDiagnostic());
     return results;
 }
 
@@ -679,22 +704,22 @@ static void KWReleaseSearchRequest(KWMessageSearchRequest *request) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             SEL getMessagesSelector = NSSelectorFromString(@"GetMsg:LocalIDArray:");
-            BOOL verified = [messageManager respondsToSelector:getMessagesSelector];
+            if (![messageManager respondsToSelector:getMessagesSelector]) {
+                NSLog(@"[WeChatKeywordCleaner] Delete calls were sent but cannot be verified: batch read-back API unavailable");
+                if (completion) completion(NO);
+                return;
+            }
+
             BOOL allRemoved = YES;
-            if (verified) {
-                for (NSString *talker in groups) {
-                    id remaining = KWSendObject2(messageManager, @"GetMsg:LocalIDArray:",
-                                                 talker, groups[talker][@"localIDs"]);
-                    if (![remaining isKindOfClass:[NSArray class]] || [(NSArray *)remaining count] > 0) {
-                        allRemoved = NO;
-                        break;
-                    }
+            for (NSString *talker in groups) {
+                id remaining = KWSendObject2(messageManager, @"GetMsg:LocalIDArray:",
+                                             talker, groups[talker][@"localIDs"]);
+                if (![remaining isKindOfClass:[NSArray class]] || [(NSArray *)remaining count] > 0) {
+                    allRemoved = NO;
+                    break;
                 }
             }
-            if (!verified) {
-                NSLog(@"[WeChatKeywordCleaner] Delete calls were sent; this WeChat build has no batch read-back API");
-            }
-            if (completion) completion(verified ? allRemoved : YES);
+            if (completion) completion(allRemoved);
         });
     });
 }

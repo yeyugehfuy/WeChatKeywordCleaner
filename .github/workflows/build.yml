@@ -2,7 +2,7 @@ name: Build WeChatKeywordCleaner
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -11,6 +11,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check source safety contracts
+        run: python3 scripts/check_contracts.py
 
       - name: Set up Theos (Linux)
         uses: Randomblock1/theos-action@v1
