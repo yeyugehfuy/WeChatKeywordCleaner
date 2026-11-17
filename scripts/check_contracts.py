@@ -34,7 +34,7 @@ check(refetch >= 0 and literal_check > refetch and delete_call > literal_check,
 check('((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(target, selector, talker, wraps, NO)' in bridge,
       "batch deletion must keep DelAll:NO")
 
-readback_start = bridge.find('SEL getMessagesSelector = NSSelectorFromString("GetMsg:LocalIDArray:")')
+readback_start = bridge.find('SEL getMessagesSelector = NSSelectorFromString(@"GetMsg:LocalIDArray:")')
 readback_end = bridge.find("});", readback_start)
 readback = bridge[readback_start:readback_end] if readback_start >= 0 and readback_end > readback_start else ""
 check("if (![messageManager respondsToSelector:getMessagesSelector])" in readback and
